@@ -597,6 +597,195 @@ def db_stats() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1B — STUDENT AUTHENTICATION
+# ══════════════════════════════════════════════════════════════════════════════
+# Uses Firebase Auth REST API (no extra SDK needed — just requests + secrets).
+# Students register / login with email + password.
+# Session key: st.session_state["student_auth"] = {uid, email, display_name}
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _firebase_web_api_key() -> str:
+    """Read Firebase Web API key from secrets (different from service-account key)."""
+    try:
+        return str(st.secrets.get("FIREBASE_WEB_API_KEY", ""))
+    except Exception:
+        return os.environ.get("FIREBASE_WEB_API_KEY", "")
+
+
+def _auth_request(endpoint: str, payload: dict) -> dict:
+    """POST to Firebase Auth REST API. Returns response dict."""
+    import urllib.request, urllib.error
+    api_key = _firebase_web_api_key()
+    if not api_key:
+        return {"error": {"message": "FIREBASE_WEB_API_KEY not set in secrets."}}
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:{endpoint}?key={api_key}"
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(url, data=data,
+                                   headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        body = json.loads(e.read())
+        return body
+    except Exception as ex:
+        return {"error": {"message": str(ex)}}
+
+
+def _auth_signup(email: str, password: str, display_name: str) -> tuple[bool, str]:
+    """Create a new student account. Returns (success, error_msg)."""
+    res = _auth_request("signUp", {
+        "email": email, "password": password, "returnSecureToken": True
+    })
+    if "error" in res:
+        msg = res["error"].get("message", "Unknown error")
+        friendly = {
+            "EMAIL_EXISTS": "อีเมลนี้ถูกใช้แล้ว กรุณา login แทน",
+            "INVALID_EMAIL": "รูปแบบอีเมลไม่ถูกต้อง",
+            "WEAK_PASSWORD : Password should be at least 6 characters": "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร",
+            "FIREBASE_WEB_API_KEY not set in secrets.": "ยังไม่ได้ตั้งค่า FIREBASE_WEB_API_KEY — ติดต่อผู้ดูแลระบบ",
+        }.get(msg, msg)
+        return False, friendly
+    # Update display name
+    id_token = res.get("idToken", "")
+    if id_token and display_name:
+        _auth_request("update", {"idToken": id_token, "displayName": display_name,
+                                  "returnSecureToken": False})
+    st.session_state["student_auth"] = {
+        "uid":          res.get("localId", ""),
+        "email":        res.get("email", email),
+        "display_name": display_name,
+        "id_token":     id_token,
+    }
+    return True, ""
+
+
+def _auth_login(email: str, password: str) -> tuple[bool, str]:
+    """Login existing student. Returns (success, error_msg)."""
+    res = _auth_request("signInWithPassword", {
+        "email": email, "password": password, "returnSecureToken": True
+    })
+    if "error" in res:
+        msg = res["error"].get("message", "Unknown error")
+        friendly = {
+            "EMAIL_NOT_FOUND":      "ไม่พบอีเมลนี้ในระบบ กรุณาสมัครก่อน",
+            "INVALID_PASSWORD":     "รหัสผ่านไม่ถูกต้อง",
+            "INVALID_LOGIN_CREDENTIALS": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+            "USER_DISABLED":        "บัญชีนี้ถูกระงับ ติดต่อผู้ดูแลระบบ",
+            "TOO_MANY_ATTEMPTS_TRY_LATER": "พยายาม login มากเกินไป กรุณารอสักครู่",
+            "FIREBASE_WEB_API_KEY not set in secrets.": "ยังไม่ได้ตั้งค่า FIREBASE_WEB_API_KEY — ติดต่อผู้ดูแลระบบ",
+        }.get(msg, msg)
+        return False, friendly
+    st.session_state["student_auth"] = {
+        "uid":          res.get("localId", ""),
+        "email":        res.get("email", email),
+        "display_name": res.get("displayName", email.split("@")[0]),
+        "id_token":     res.get("idToken", ""),
+    }
+    return True, ""
+
+
+def _auth_reset_password(email: str) -> tuple[bool, str]:
+    """Send password-reset email."""
+    res = _auth_request("sendOobCode", {"requestType": "PASSWORD_RESET", "email": email})
+    if "error" in res:
+        return False, res["error"].get("message", "Error")
+    return True, ""
+
+
+def _student_logged_in() -> bool:
+    return bool(st.session_state.get("student_auth", {}).get("uid"))
+
+
+def _student_info() -> dict:
+    return st.session_state.get("student_auth", {})
+
+
+def _render_student_login_page():
+    """Full student login/register UI. Returns True if already logged in."""
+    if _student_logged_in():
+        return True
+
+    # Check if Firebase Web API key is configured — if not, skip auth gracefully
+    if not _firebase_web_api_key():
+        return True   # allow anonymous access when auth not configured
+
+    st.markdown(
+        '<div style="max-width:440px;margin:3rem auto 0;">'
+        '<div style="background:linear-gradient(135deg,#0D1B2A,#1A2F47);'
+        'border-radius:16px;padding:2rem;text-align:center;margin-bottom:1.5rem;">'
+        '<div style="font-family:Playfair Display,serif;font-size:1.8rem;'
+        'font-weight:700;color:#F0D98A;">MathComp ✦</div>'
+        '<div style="color:rgba(255,255,255,.55);font-size:.85rem;margin-top:.25rem;">'
+        'เข้าสู่ระบบเพื่อดูประวัติและรับ Certificate</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    tab_login, tab_register = st.tabs(["🔑 เข้าสู่ระบบ", "📝 สมัครใหม่"])
+
+    with tab_login:
+        with st.form("student_login_form"):
+            email_l = st.text_input("อีเมล", placeholder="yourname@email.com")
+            pass_l  = st.text_input("รหัสผ่าน", type="password")
+            col_btn, col_forgot = st.columns([2, 1])
+            with col_btn:
+                do_login = st.form_submit_button("เข้าสู่ระบบ", type="primary",
+                                                  use_container_width=True)
+            with col_forgot:
+                do_reset = st.form_submit_button("ลืมรหัสผ่าน?", use_container_width=True)
+
+        if do_login:
+            if not email_l or not pass_l:
+                st.error("กรุณากรอกอีเมลและรหัสผ่าน")
+            else:
+                ok, err = _auth_login(email_l.strip(), pass_l)
+                if ok:
+                    st.success("✓ เข้าสู่ระบบสำเร็จ!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {err}")
+
+        if do_reset:
+            if not email_l:
+                st.error("กรุณากรอกอีเมลก่อน")
+            else:
+                ok, err = _auth_reset_password(email_l.strip())
+                if ok:
+                    st.success("✉️ ส่งลิงก์รีเซ็ตรหัสผ่านไปที่อีเมลแล้ว")
+                else:
+                    st.error(f"❌ {err}")
+
+        st.caption("ยังไม่มีบัญชี? คลิกแท็บ 'สมัครใหม่' ด้านบน")
+
+    with tab_register:
+        with st.form("student_register_form"):
+            reg_name  = st.text_input("ชื่อ-นามสกุล *", placeholder="เช่น สมชาย ใจดี")
+            reg_email = st.text_input("อีเมล *", placeholder="yourname@email.com")
+            reg_pass  = st.text_input("รหัสผ่าน * (อย่างน้อย 6 ตัว)", type="password")
+            reg_pass2 = st.text_input("ยืนยันรหัสผ่าน *", type="password")
+            do_signup = st.form_submit_button("สมัครสมาชิก", type="primary",
+                                               use_container_width=True)
+
+        if do_signup:
+            if not reg_name or not reg_email or not reg_pass:
+                st.error("กรุณากรอกข้อมูลให้ครบ")
+            elif len(reg_pass) < 6:
+                st.error("รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร")
+            elif reg_pass != reg_pass2:
+                st.error("รหัสผ่านไม่ตรงกัน")
+            else:
+                ok, err = _auth_signup(reg_email.strip(), reg_pass, reg_name.strip())
+                if ok:
+                    st.success("✓ สมัครสมาชิกสำเร็จ! กำลังเข้าสู่ระบบ…")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {err}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()   # don't render the exam page until logged in
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SECTION 2 — AI HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 # ── CONFIG stored in secrets ────────────────────────────────────────────────
@@ -1319,6 +1508,33 @@ def _init_student():
 def page_student():
     _init_student()
 
+    # ── Auth gate (soft — skips if FIREBASE_WEB_API_KEY not set) ──────────
+    _render_student_login_page()
+
+    # ── Top nav bar for logged-in students ─────────────────────────────────
+    if _student_logged_in():
+        info = _student_info()
+        nav1, nav2, nav3 = st.columns([4, 2, 1])
+        with nav1:
+            st.markdown(
+                f'<div style="font-size:13px;color:#888;padding:.4rem 0;">'
+                f'👋 สวัสดี <strong>{info.get("display_name") or info.get("email","")}</strong></div>',
+                unsafe_allow_html=True,
+            )
+        with nav2:
+            if st.button("📈 ประวัติของฉัน", use_container_width=True):
+                st.session_state["show_progress"] = True
+                st.rerun()
+        with nav3:
+            if st.button("ออก", use_container_width=True):
+                st.session_state.pop("student_auth", None)
+                st.rerun()
+
+    # ── Progress dashboard page ────────────────────────────────────────────
+    if st.session_state.get("show_progress"):
+        _page_student_progress()
+        return
+
     st.markdown(
         '<div class="hero"><h1>Practice Like a Champion ✦</h1>'
         '<p>Choose by competition series or by your school grade — then pick your difficulty and start practising.</p></div>',
@@ -2029,6 +2245,8 @@ def _student_results():
             "last_name":    st.session_state.get("student_last_name", ""),
             "school":       st.session_state.get("student_school", ""),
             "class_pin":    st.session_state.get("student_class_pin", ""),
+            "student_uid":   _student_info().get("uid", ""),
+            "student_email": _student_info().get("email", ""),
             "mode":         mode,
             "competition":  comp_code if mode == "competition" else grade_sel,
             "difficulty":   st.session_state.get("selected_diff", "mixed"),
@@ -2199,6 +2417,22 @@ def _student_results():
                 st.markdown(q.get("solution", "No solution provided."))
 
     st.markdown("---")
+
+    # ── Certificate download ───────────────────────────────────────────────
+    if show_score:
+        cert_record = {
+            "first_name":  st.session_state.get("student_first_name", ""),
+            "last_name":   st.session_state.get("student_last_name", ""),
+            "competition": st.session_state.get("selected_comp") or st.session_state.get("selected_grade",""),
+            "score_pct":   pct,
+            "correct":     correct_count,
+            "total_q":     total,
+            "time_sec":    elapsed,
+            "timestamp":   time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+        _show_certificate_button(cert_record)
+        st.markdown("---")
+
     if st.button("🔄 Start New Exam", type="primary"):
         for k in ["exam_step", "setup_step", "exam_mode",
                   "selected_comp", "selected_grade", "selected_diff",
@@ -2207,6 +2441,295 @@ def _student_results():
                   "student_first_name", "student_last_name", "student_school",
                   "comp_show_score", "comp_show_solution", "comp_show_analysis"]:
             st.session_state.pop(k, None)
+        st.rerun()
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 6B — CERTIFICATE GENERATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _generate_certificate_pdf(
+    student_name: str,
+    competition: str,
+    score_pct: int,
+    correct: int,
+    total: int,
+    time_str: str,
+    timestamp: str,
+    cert_id: str,
+) -> bytes:
+    """
+    Generate a PDF certificate using reportlab.
+    Returns bytes of the PDF file.
+    """
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER
+        import io as _io
+
+        buf = _io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=landscape(A4),
+            topMargin=1.5*cm, bottomMargin=1.5*cm,
+            leftMargin=2*cm, rightMargin=2*cm,
+        )
+
+        W, H = landscape(A4)
+        navy   = colors.HexColor("#0D1B2A")
+        gold   = colors.HexColor("#C9A84C")
+        gold2  = colors.HexColor("#F0D98A")
+        cream  = colors.HexColor("#FAF8F3")
+        gray   = colors.HexColor("#888888")
+
+        styles = getSampleStyleSheet()
+        def sty(name, **kw):
+            s = ParagraphStyle(name, parent=styles["Normal"], **kw)
+            return s
+
+        header_sty  = sty("hdr",  fontName="Helvetica-Bold",   fontSize=11,
+                          textColor=gray, alignment=TA_CENTER, spaceAfter=4)
+        title_sty   = sty("ttl",  fontName="Helvetica-Bold",   fontSize=36,
+                          textColor=gold,  alignment=TA_CENTER, spaceAfter=6)
+        sub_sty     = sty("sub",  fontName="Helvetica",         fontSize=13,
+                          textColor=navy,  alignment=TA_CENTER, spaceAfter=4)
+        name_sty    = sty("nm",   fontName="Helvetica-Bold",   fontSize=28,
+                          textColor=navy,  alignment=TA_CENTER, spaceAfter=6)
+        body_sty    = sty("bd",   fontName="Helvetica",         fontSize=12,
+                          textColor=navy,  alignment=TA_CENTER, spaceAfter=4)
+        score_sty   = sty("sc",   fontName="Helvetica-Bold",   fontSize=22,
+                          textColor=gold,  alignment=TA_CENTER, spaceAfter=4)
+        small_sty   = sty("sm",   fontName="Helvetica",         fontSize=9,
+                          textColor=gray,  alignment=TA_CENTER, spaceAfter=2)
+
+        grade = (
+            "Distinction ✦" if score_pct >= 80 else
+            "Merit"          if score_pct >= 60 else
+            "Participation"
+        )
+
+        story = [
+            Paragraph("MATH MISSION THAILAND", header_sty),
+            HRFlowable(width="80%", thickness=1, color=gold, spaceAfter=8),
+            Paragraph("Certificate of Achievement", title_sty),
+            Spacer(1, 0.3*cm),
+            Paragraph("This is to certify that", sub_sty),
+            Spacer(1, 0.2*cm),
+            Paragraph(student_name, name_sty),
+            HRFlowable(width="50%", thickness=0.5, color=gold, spaceAfter=8),
+            Paragraph(f"has successfully completed the", body_sty),
+            Paragraph(f"<b>{competition}</b>", sty("comp", fontName="Helvetica-Bold",
+                      fontSize=16, textColor=navy, alignment=TA_CENTER, spaceAfter=4)),
+            Spacer(1, 0.3*cm),
+            Paragraph(f"with a score of", body_sty),
+            Paragraph(f"{score_pct}% &nbsp;·&nbsp; {correct}/{total} correct &nbsp;·&nbsp; Time: {time_str}", score_sty),
+            Paragraph(f"Grade: <b>{grade}</b>", body_sty),
+            Spacer(1, 0.5*cm),
+            HRFlowable(width="80%", thickness=1, color=gold, spaceAfter=8),
+            Paragraph(f"Date: {timestamp[:10]}    |    Certificate ID: {cert_id}", small_sty),
+            Paragraph("Verify at: mathcomp.streamlit.app/?verify=" + cert_id, small_sty),
+        ]
+
+        doc.build(story)
+        return buf.getvalue()
+
+    except ImportError:
+        # reportlab not installed — return a minimal placeholder
+        return b"%PDF placeholder - install reportlab"
+    except Exception as e:
+        return f"%PDF error: {e}".encode()
+
+
+def _cert_id(record: dict) -> str:
+    """Deterministic short certificate ID from record fields."""
+    import hashlib
+    raw = f"{record.get('first_name','')}{record.get('last_name','')}{record.get('timestamp','')}{record.get('score_pct','')}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:12].upper()
+
+
+def _show_certificate_button(record: dict):
+    """Render download button for certificate if score qualifies (≥ 50%)."""
+    pct = record.get("score_pct", 0)
+    if pct < 50:
+        st.info("📋 Certificate available when score ≥ 50%")
+        return
+
+    student_name = f"{record.get('first_name','')} {record.get('last_name','')}".strip()
+    competition  = record.get("competition", "Math Competition")
+    correct      = record.get("correct", 0)
+    total        = record.get("total_q", 0)
+    elapsed      = record.get("time_sec", 0)
+    mm, ss       = divmod(int(elapsed), 60)
+    time_str     = f"{mm:02d}:{ss:02d}"
+    timestamp    = record.get("timestamp", "")
+    cert_id      = _cert_id(record)
+
+    pdf_bytes = _generate_certificate_pdf(
+        student_name=student_name,
+        competition=competition,
+        score_pct=pct,
+        correct=correct,
+        total=total,
+        time_str=time_str,
+        timestamp=timestamp,
+        cert_id=cert_id,
+    )
+
+    grade = "Distinction ✦" if pct >= 80 else "Merit" if pct >= 60 else "Participation"
+    grade_color = "#C9A84C" if pct >= 80 else "#2D7D4F" if pct >= 60 else "#888"
+
+    st.markdown(
+        f'<div style="background:linear-gradient(135deg,#0D1B2A,#1A2F47);'
+        f'border-radius:12px;padding:1.2rem 1.5rem;margin:1rem 0;'
+        f'display:flex;align-items:center;justify-content:space-between;">'
+        f'<div>'
+        f'<div style="color:#F0D98A;font-weight:700;font-size:1rem;">🏅 Certificate Ready</div>'
+        f'<div style="color:rgba(255,255,255,.6);font-size:.85rem;margin-top:2px;">'
+        f'Grade: <span style="color:{grade_color};font-weight:600;">{grade}</span>'
+        f'  ·  ID: <code style="color:rgba(255,255,255,.5);">{cert_id}</code></div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.download_button(
+        label="⬇️ Download Certificate (PDF)",
+        data=pdf_bytes,
+        file_name=f"MathComp_Certificate_{cert_id}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 6C — STUDENT PROGRESS DASHBOARD
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_student_records(uid: str = "", email: str = "") -> list:
+    """Load records for one student — matched by Firebase UID or email."""
+    all_records = _load_records()
+    if not uid and not email:
+        return []
+    return [
+        r for r in all_records
+        if r.get("student_uid") == uid
+        or r.get("student_email", "").lower() == email.lower()
+    ]
+
+
+def _page_student_progress():
+    """Student's personal progress dashboard — shown when they click 'My History'."""
+    info = _student_info()
+    if not info.get("uid"):
+        st.info("กรุณาเข้าสู่ระบบก่อนเพื่อดูประวัติการสอบ")
+        return
+
+    st.markdown(
+        f'<div style="background:linear-gradient(135deg,#0D1B2A,#1A2F47);'
+        f'border-radius:14px;padding:1.5rem 2rem;margin-bottom:1.5rem;">'
+        f'<h2 style="color:#F0D98A;margin:0;font-family:Playfair Display,serif;">📈 ประวัติการสอบ</h2>'
+        f'<p style="color:rgba(255,255,255,.55);margin:.3rem 0 0;font-size:.9rem;">'
+        f'{info.get("display_name","") or info.get("email","")}</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    records = _load_student_records(uid=info.get("uid",""), email=info.get("email",""))
+
+    if not records:
+        st.info("ยังไม่มีประวัติการสอบ — ไปทำข้อสอบก่อนแล้วกลับมาดูที่นี่")
+        if st.button("🎓 ไปหน้าข้อสอบ"):
+            st.session_state["show_progress"] = False
+            st.rerun()
+        return
+
+    # ── Summary metrics ────────────────────────────────────────────────────
+    scores   = [r.get("score_pct", 0) for r in records]
+    avg_sc   = round(sum(scores) / len(scores), 1)
+    best_sc  = max(scores)
+    total_ex = len(records)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📝 ข้อสอบทั้งหมด", total_ex)
+    m2.metric("📊 คะแนนเฉลี่ย", f"{avg_sc}%")
+    m3.metric("🏆 คะแนนสูงสุด", f"{best_sc}%")
+
+    st.markdown("---")
+
+    # ── Score trend chart ──────────────────────────────────────────────────
+    if len(records) >= 2:
+        try:
+            import plotly.graph_objects as go
+            dates  = [r.get("timestamp","")[:10] for r in reversed(records)]
+            scrs   = [r.get("score_pct", 0) for r in reversed(records)]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=dates, y=scrs, mode="lines+markers",
+                line=dict(color="#C9A84C", width=2),
+                marker=dict(size=8, color="#F0D98A"),
+                name="Score %",
+            ))
+            fig.update_layout(
+                title="แนวโน้มคะแนน", height=260,
+                xaxis_title="วันที่", yaxis_title="Score %",
+                yaxis=dict(range=[0, 105]),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#0D1B2A"),
+                margin=dict(l=30, r=30, t=40, b=30),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception:
+            pass
+
+    # ── Exam history list ──────────────────────────────────────────────────
+    st.markdown("### 📋 รายการการสอบ")
+    for r in records:
+        pct  = r.get("score_pct", 0)
+        comp = r.get("competition", "—")
+        ts   = r.get("timestamp", "")[:16]
+        grade_col = "#C9A84C" if pct >= 80 else "#2D7D4F" if pct >= 60 else "#C0392B" if pct >= 50 else "#888"
+
+        with st.expander(f"**{comp}** — {pct}% — {ts}"):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("คะแนน", f"{pct}%")
+            c2.metric("ถูก/ทั้งหมด", f"{r.get('correct',0)}/{r.get('total_q',0)}")
+            elapsed = r.get("time_sec", 0)
+            mm2, ss2 = divmod(int(elapsed), 60)
+            c3.metric("เวลา", f"{mm2:02d}:{ss2:02d}")
+
+            # Topic scores
+            ts_dict = r.get("topic_scores", {})
+            if ts_dict:
+                st.markdown("**ผลตามหัวข้อ:**")
+                for topic, val in ts_dict.items():
+                    if isinstance(val, dict):
+                        c_cnt = val.get("correct", 0)
+                        t_cnt = val.get("total", 0)
+                    else:
+                        continue
+                    if t_cnt > 0:
+                        bar_pct = int(c_cnt / t_cnt * 100)
+                        bar_col = "#2D7D4F" if bar_pct >= 70 else "#B8860B" if bar_pct >= 40 else "#C0392B"
+                        st.markdown(
+                            f'<div style="margin-bottom:5px;">'
+                            f'<div style="display:flex;justify-content:space-between;font-size:12px;">'
+                            f'<span>{topic}</span>'
+                            f'<span style="color:{bar_col};font-weight:600;">{c_cnt}/{t_cnt}</span></div>'
+                            f'<div style="background:#EDE8DC;border-radius:3px;height:5px;">'
+                            f'<div style="background:{bar_col};width:{bar_pct}%;height:100%;border-radius:3px;"></div>'
+                            f'</div></div>',
+                            unsafe_allow_html=True,
+                        )
+
+            st.markdown("---")
+            _show_certificate_button(r)
+
+    st.markdown("---")
+    if st.button("🎓 กลับหน้าข้อสอบ", type="primary"):
+        st.session_state["show_progress"] = False
         st.rerun()
 
 
@@ -3689,6 +4212,27 @@ FIREBASE_PRIVATE_KEY    = "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVAT
 ```
 Get these values from the JSON file you downloaded from Firebase Console → Project Settings → Service Accounts → Generate new private key.
             """)
+    st.markdown("---")
+
+    # ── 0b. FIREBASE WEB API KEY (for Student Auth) ────────────────────────
+    st.markdown("**👤 Student Authentication (Firebase Web API Key)**")
+    web_key = _firebase_web_api_key()
+    if web_key:
+        st.success("✅ FIREBASE_WEB_API_KEY set — นักเรียนสามารถสมัครและ login ได้")
+    else:
+        st.warning("⚠️ ยังไม่ได้ตั้งค่า FIREBASE_WEB_API_KEY — นักเรียนจะข้าม login ไปได้เลย (anonymous mode)")
+        with st.expander("วิธีเพิ่ม Firebase Web API Key"):
+            st.markdown("""
+**ขั้นตอน:**
+1. Firebase Console → Project Settings → General
+2. เลื่อนลงหา **"Your apps"** → Web app → Copy **"apiKey"**
+3. เพิ่มใน Streamlit Cloud → App Settings → Secrets:
+```toml
+FIREBASE_WEB_API_KEY = "AIzaSy..."
+```
+4. Firebase Console → Authentication → Sign-in method → เปิด **Email/Password**
+            """)
+
     st.markdown("---")
 
     # ── 1. API KEY ─────────────────────────────────────────────────────────
