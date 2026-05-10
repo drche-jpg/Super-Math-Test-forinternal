@@ -1511,6 +1511,17 @@ def page_student():
     # ── Auth gate (soft — skips if FIREBASE_WEB_API_KEY not set) ──────────
     _render_student_login_page()
 
+    # ── Pre-fill name from Firebase Auth if not already set ────────────────
+    if _student_logged_in():
+        info = _student_info()
+        display = info.get("display_name", "")
+        if display and not st.session_state.get("student_first_name"):
+            parts = display.strip().split(" ", 1)
+            st.session_state["student_first_name"] = parts[0]
+            st.session_state["student_last_name"]  = parts[1] if len(parts) > 1 else ""
+        if info.get("email") and not st.session_state.get("student_school"):
+            pass  # could pre-fill school too if stored in profile later
+
     # ── Top nav bar for logged-in students ─────────────────────────────────
     if _student_logged_in():
         info = _student_info()
@@ -2609,16 +2620,37 @@ def _show_certificate_button(record: dict):
 # SECTION 6C — STUDENT PROGRESS DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _load_student_records(uid: str = "", email: str = "") -> list:
-    """Load records for one student — matched by Firebase UID or email."""
+def _load_student_records(uid: str = "", email: str = "", display_name: str = "") -> list:
+    """Load records for one student — matched by UID, email, or display name."""
     all_records = _load_records()
-    if not uid and not email:
+    if not uid and not email and not display_name:
         return []
-    return [
-        r for r in all_records
-        if r.get("student_uid") == uid
-        or r.get("student_email", "").lower() == email.lower()
-    ]
+
+    # Split display_name into first/last for legacy record matching
+    first, last = "", ""
+    if display_name:
+        parts = display_name.strip().split(" ", 1)
+        first = parts[0].lower()
+        last  = parts[1].lower() if len(parts) > 1 else ""
+
+    result = []
+    for r in all_records:
+        # Match by UID (most reliable)
+        if uid and r.get("student_uid") == uid:
+            result.append(r)
+            continue
+        # Match by email
+        if email and r.get("student_email", "").lower() == email.lower():
+            result.append(r)
+            continue
+        # Match by name (for records created before auth was added)
+        if first and last:
+            r_first = r.get("first_name", "").lower()
+            r_last  = r.get("last_name", "").lower()
+            if r_first == first and r_last == last:
+                result.append(r)
+                continue
+    return result
 
 
 def _page_student_progress():
@@ -2637,7 +2669,11 @@ def _page_student_progress():
         unsafe_allow_html=True,
     )
 
-    records = _load_student_records(uid=info.get("uid",""), email=info.get("email",""))
+    records = _load_student_records(
+        uid=info.get("uid", ""),
+        email=info.get("email", ""),
+        display_name=info.get("display_name", ""),
+    )
 
     if not records:
         st.info("ยังไม่มีประวัติการสอบ — ไปทำข้อสอบก่อนแล้วกลับมาดูที่นี่")
